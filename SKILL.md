@@ -241,6 +241,28 @@ cd ~/.openclaw/workspace/skills/asds-mode && git push
 
 ---
 
+## 已知构建问题（React Native / Expo）
+
+### 问题：fmt 11.0.2 + Apple Clang 21 C++20 consteval 不兼容
+
+**症状**：xcodebuild 失败，报错：
+```
+error: call to consteval function is not a constant expression
+```
+
+**根因**：React Native 0.76.9 自带 fmt 11.0.2，使用 C++20 `consteval`。Apple Clang 21 不支持。
+
+**修复**：在 `pod install` 后、`xcodebuild` 前执行 patch：
+```bash
+python3 ~/.openclaw/workspace/skills/asds-mode/scripts/patch-fmt-consteval.py
+```
+
+脚本路径：`~/.openclaw/workspace/skills/asds-mode/scripts/patch-fmt-consteval.py`
+
+**自动触发条件**：检测到 `ios/Pods/fmt/include/fmt/format-inl.h` 存在且包含 `FMT_STRING` 调用时自动执行。
+
+---
+
 ## 相关文件路径
 
 | 文件 | 路径 |

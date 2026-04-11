@@ -50,6 +50,20 @@ with open('tasks.json', 'w') as f:
 9. 无 PENDING 任务时报汇报
 ```
 
+## React Native / Expo 构建预处理
+
+**仅当检测到 `ios/Pods/fmt/include/fmt/format-inl.h` 存在时执行**：
+
+在 `pod install` 之后、`xcodebuild` 之前，自动执行 fmt patch：
+```bash
+cd 项目目录
+python3 ~/.openclaw/workspace/skills/asds-mode/scripts/patch-fmt-consteval.py
+```
+
+如果不执行此 patch，xcodebuild 会报 `consteval function is not a constant expression` 错误（Apple Clang 21 + fmt 11.0.2 不兼容）。
+
+## 禁止行为
+
 ## PROGRESS.md 更新格式（强制）
 
 每次状态变更后立即更新：
