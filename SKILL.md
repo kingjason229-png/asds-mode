@@ -1,276 +1,297 @@
 ---
 name: asds-mode
-description: ASDS 全自动开发工作流。当用户提到「全自动开发」「ASDS」「autonomous devops」「无人值守」「持续集成」时激活。
+description: ASDS Lite 全自动开发工作流。当用户提到「全自动开发」「ASDS」「autonomous devops」「无人值守」「持续集成」时激活。
 ---
 
-# ASDS Mode - 全自动软件开发工作流
+# ASDS Lite - 瘦身后的全自动开发工作流
 
-ASDS（Autonomous Software Development System）是一套 7×24 小时无人值守的全自动软件开发系统。人类只做两件事：提出需求、验收结果。
+ASDS Lite 的目标不是“功能最多”，而是“最小可靠闭环”。
+
+人类只做三件事：
+1. 提需求
+2. 回答必要澄清
+3. 验收结果
+
+其余流程由系统自动推进，但只保留最小内核。
 
 ## 核心原则（不可违反）
 
-1. **tasks.json 是唯一事实源** - 所有状态来自文件，不依赖 session 记忆
-2. **禁止纯文本结束回合** - 每次必须调用工具
-3. **回压门强制执行** - lint → typecheck → test → build 全部通过才能标记 DONE
-4. **强制状态落盘** - 每次操作后必须更新 tasks.json + PROGRESS.md（python3 写入）
-5. **单文件规则** - 一次只改一个文件
-6. **自驱动闭环** - Orchestrator 自动驱动 coder → qa → coder → qa 的循环，不需要人触发下一步
+1. `tasks.json` 是唯一事实源
+2. 只保留三个角色：`orchestrator` / `coder` / `qa`
+3. `orchestrator` 兼任 PM 拆解，不再单独设置 PM Agent
+4. 串行执行：同一项目同一时间只允许一个活跃任务
+5. `coder` 负责实现 + 跑项目定义的验证链
+6. `qa` 只做静态业务复核，不改代码、不重复跑一套新测试
+7. `PROGRESS.md` 只允许 `orchestrator` 写
+8. 所有状态变更必须原子写入 `tasks.json`
+9. 自动化只保留主闭环，不保留外围运营层自动化
+10. 每个 task 优先保留 `affected_files / verification_summary / verification_artifacts`
+11. `BLOCKED` 不扩子状态；如需说明阻塞原因，用 `blocker_type`
+12. `RETRY` 必须累计 `retry_count`，达到阈值后升级为 `BLOCKED`
 
 ---
 
 ## 系统架构
 
-```
-用户（提交需求）
-    │
-    ▼
-┌──────────────────────────────────────────────────────────────┐
-│  Orchestrator Agent（自驱动循环）                               │
-│  · 读取 tasks.json                                          │
-│  · PENDING → spawn coder → coder DONE → spawn qa           │
-│  · qa DONE → 更新 tasks.json → loop                         │
-│  · 遇到 BLOCKED → 通知用户 → 退出                          │
-│  · 全部 DONE → 通知用户 → 退出                              │
-└───────────────────────────┬────────────────────────────────┘
-                            │
-              ┌─────────────┼─────────────┐
-              ▼             ▼             ▼
-        ┌──────────┐ ┌──────────┐ ┌──────────┐
-        │  coder   │ │    qa    │ │ tasks.json│
-        │GPT-5.4   │ │GPT-5.4   │ │唯一事实源 │
-        │写代码+验证│ │业务复核  │ │PROGRESS.md│
-        └──────────┘ └──────────┘ └──────────┘
+```text
+用户
+  ↓
+DEMAND.md
+  ↓
+orchestrator
+  ├─ 读取需求并拆成 tasks.json
+  ├─ 派发 coder
+  ├─ 派发 qa
+  ├─ 写 PROGRESS.md
+  └─ 处理 RETRY / BLOCKED
+        ↓
+     tasks.json
 ```
 
 ---
 
 ## 三角色
 
-### Orchestrator
-- **职责**：自驱动闭环调度，不写代码
-- **模型**：MiniMax-M2.7
-- **运行方式**：persistent session 或 cron 定时触发
-- **调度方式**：spawn coder → 阻塞等完成 → spawn qa → 阻塞等完成 → 更新状态 → loop
-- **异常处理**：BLOCKED → 飞书通知用户 → 退出
+### orchestrator
+职责：
+- 读取 `DEMAND.md`
+- 需求不清时向用户澄清
+- 生成/维护 `tasks.json`
+- 串行派发 `coder`
+- 在 `coder` 完成后派发 `qa`
+- 更新 `PROGRESS.md`
+- 处理 `BLOCKED`
 
-### Coder
-- **职责**：执行任务 + 跑回压门验证
-- **模型**：GPT-5.4（不改）
-- **关键约束**：
-  - tasks.json 必须用 python3 写入（禁止 echo/字符串拼接）
-  - 回压门必须依次执行：lint → typecheck → test → build
-  - PROGRESS.md 必须同步更新
+禁止：
+- 不写业务代码
+- 不从对话历史推断任务状态
 
-### QA
-- **职责**：业务逻辑复核（静态，不重复跑测试）
-- **模型**：GPT-5.4（不改）
-- **关键约束**：
-  - 只读不写（openclaw.json deny write/edit/exec）
-  - 复核结果用 python3 写入 tasks.json
-  - PROGRESS.md 必须同步更新
+### coder
+职责：
+- 读取当前任务
+- 修改代码
+- 执行项目定义的验证链
+- 更新 `tasks.json`
+
+禁止：
+- 不自行扩展需求
+- 不跳过验证直接标记 `DONE`
+
+### qa
+职责：
+- 对照 `acceptance_criteria` 做静态复核
+- 基于代码、diff、验证结果判断 `DONE / RETRY / BLOCKED`
+- 更新 `tasks.json`
+
+禁止：
+- 不改代码
+- 不重复跑一整套动态测试体系
+- 不自行新增需求
 
 ---
 
-## 任务状态机
+## 状态机（只保留 5 个状态）
 
-```
+```text
 PENDING
-    │
-    │ orchestrator 领取
-    ▼
-IN_PROGRESS（coder 执行中）
-    │
-    ├──► 回压门全过 → DONE（coder 标记）
-    │         │
-    │         └──► QA 业务复核
-    │                   │
-    │                   ├──► PASS → 最终确认 DONE
-    │                   │
-    │                   └──► FAIL → FAIL_RETRY → PENDING（退回 coder 重做）
-    │
-    ├──► 回压门失败（最多重试1次）
-    │         │
-    │         ├──► 重试成功 → DONE → QA 复核
-    │         │
-    │         └──► 仍失败 → FAILED → 通知用户 → 下一个任务
-    │
-    └──► 连续3次 FAIL_RETRY → BLOCKED → 人工介入
+  ↓
+IN_PROGRESS
+  ├─ 验证通过 → DONE
+  ├─ 需要修改 → RETRY
+  └─ 需人工介入 → BLOCKED
+
+RETRY
+  ↓
+PENDING
 ```
 
----
-
-## tasks.json 安全写入（强制）
-
-所有角色写入 tasks.json 必须用 python3：
-
-```python
-import json
-from datetime import datetime
-
-with open('tasks.json') as f:
-    d = json.load(f)
-
-# 修改
-for t in d['tasks']:
-    if t['id'] == 'TASK-001':
-        t['status'] = 'DONE'
-        t['updatedAt'] = datetime.utcnow().strftime('%Y-%m-%dT%H:%M:%SZ')
-
-# 写入（python3 自动校验 JSON 合法性）
-with open('tasks.json', 'w') as f:
-    json.dump(d, f, indent=2, ensure_ascii=False)
-```
-
-**禁止**：echo "..." > tasks.json、字符串拼接、JSON.stringify 手动拼接。
-
----
-
-## PROGRESS.md 更新格式（强制）
-
-每次状态变更后立即更新，格式如下：
-
-```markdown
-## [任务ID] - [ISO时间]
-
-### 状态
-- status: PENDING | IN_PROGRESS | DONE | FAIL_RETRY | BLOCKED
-
-### 本次完成
-- [具体做了什么]
-
-### 验证结果
-- Build: PASS | FAIL
-
-### 下一步
-- [下一个任务ID] 或 [全部完成]
-```
-
----
-
-## 自驱动调度伪代码
-
-```
-orchestrator_loop():
-    WHILE True:
-        tasks = read_tasks_json()
-
-        if all_done(tasks):
-            notify_user("全部任务完成")
-            exit
-
-        task = find_first_pending(tasks)
-        update_status(task.id, 'IN_PROGRESS')
-
-        # coder 执行（阻塞）
-        spawn_and_wait(agentId='coder', task=task)
-
-        # qa 复核（阻塞）
-        tasks = read_tasks_json()
-        if get_task(tasks, task.id).status == 'DONE':
-            spawn_and_wait(agentId='qa', task=task)
-
-        # 收尾
-        tasks = read_tasks_json()
-        update_progress(tasks)
-        persist(tasks)
-
-    END WHILE
-```
-
----
-
-## 启动方式
-
-### 方式 1：用户指令触发（main）
-```
-用户 → main → sessions_spawn(orchestrator) → 自驱动循环开始
-```
-
-### 方式 2：Cron 定时调度（推荐）
-```
-cron（每10分钟） → 检查 tasks.json → 如有 PENDING → sessions_spawn(orchestrator)
-```
+说明：
+- 不再单独使用 `FAILED`
+- 只要系统还能自动继续，就走 `RETRY`
+- 只有确实需要人介入时才进入 `BLOCKED`
+- `BLOCKED` 的原因写在 `blocker_type`，不新增子状态
+- `RETRY` 必须累计 `retry_count`；达到阈值自动升级为 `BLOCKED`
+- 用户补齐 blocker 后，直接走现有 `resume` 入口恢复，由 orchestrator 决定是否重新打开任务
 
 ---
 
 ## 项目结构标准
 
-每个 ASDS 项目必须有：
-```
+每个 ASDS Lite 项目必须有：
+
+```text
 项目目录/
-├── tasks.json       # 任务队列（唯一事实源）
-├── PROGRESS.md      # 进度日志（tail 即可巡检）
-├── AGENTS.md        # 项目验证命令（lint/typecheck/test/build）
-└── DEMAND.md        # 原始需求文档
+├── DEMAND.md
+├── tasks.json
+├── AGENTS.md
+└── PROGRESS.md
 ```
+
+### 文件职责
+- `DEMAND.md`：原始需求
+- `tasks.json`：唯一事实源
+- `AGENTS.md`：本项目验证命令定义
+- `PROGRESS.md`：由 orchestrator 写的摘要日志
 
 ---
 
-## 异常处理
+## tasks.json 建议结构
 
-| 情况 | 处理 |
-|------|------|
-| build 失败 | coder 标记 FAILED，orchestrator 通知用户，继续下一个 |
-| 连续 3 次 FAIL_RETRY | BLOCKED，orchestrator 通知用户，退出 |
-| 需求模糊 | orchestrator 请求澄清，不自行猜测 |
-| tasks.json 写入失败 | 不标记 DONE，记录 PROGRESS.md，等待人工 |
-| Orchestrator 崩溃 | cron 定时检测，重新触发 orchestrator |
+```json
+{
+  "project": "example-project",
+  "active_task_id": null,
+  "tasks": [
+    {
+      "id": "TASK-001",
+      "title": "实现登录表单",
+      "acceptance_criteria": [
+        "用户可输入手机号",
+        "提交后有成功/失败反馈"
+      ],
+      "status": "PENDING",
+      "retry_count": 0,
+      "notes": ""
+    }
+  ]
+}
+```
+
+建议字段：
+- `id`
+- `title`
+- `acceptance_criteria`
+- `status`
+- `retry_count`
+- `notes`
+
+暂不引入：
+- 并发派发字段
+- 多项目调度字段
+- 复杂依赖图字段
+- 运营层巡检字段
 
 ---
 
-## 部署检查清单
+## tasks.json 原子写入（强制）
 
-```bash
-# 1. Agent 就绪
-openclaw agents list  # 确认 orchestrator/coder/qa
+必须使用：
+1. 读取当前 JSON
+2. 修改内存对象
+3. 先写入 `tasks.json.tmp`
+4. 回读校验 JSON
+5. `rename` 原子替换 `tasks.json`
 
-# 2. 看门狗运行
-ps aux | grep watchdog  # 确认 PID
-
-# 3. Cron 调度
-openclaw cron list  # 确认 ASDS Orchestrator Scheduler
-
-# 4. 项目结构
-ls 项目/tasks.json   # 必须存在
-ls 项目/PROGRESS.md  # 必须存在
-ls 项目/AGENTS.md    # 必须存在
-
-# 5. GitHub 更新
-cd ~/.openclaw/workspace/skills/asds-mode && git push
-```
+禁止：
+- `echo > tasks.json`
+- 手写字符串拼 JSON
+- `truncate` 后直接覆盖但无回滚
 
 ---
 
-## 已知构建问题（React Native / Expo）
+## AGENTS.md 验证链（项目定义）
 
-### 问题：fmt 11.0.2 + Apple Clang 21 C++20 consteval 不兼容
+不要把验证链写死为 `lint -> typecheck -> test -> build`。
 
-**症状**：xcodebuild 失败，报错：
-```
-error: call to consteval function is not a constant expression
-```
+改为：每个项目在 `AGENTS.md` 里定义自己的验证命令，例如：
 
-**根因**：React Native 0.76.9 自带 fmt 11.0.2，使用 C++20 `consteval`。Apple Clang 21 不支持。
-
-**修复**：在 `pod install` 后、`xcodebuild` 前执行 patch：
-```bash
-python3 ~/.openclaw/workspace/skills/asds-mode/scripts/patch-fmt-consteval.py
+```text
+Validation:
+1. npm run lint
+2. npm run test
+3. npm run build
 ```
 
-脚本路径：`~/.openclaw/workspace/skills/asds-mode/scripts/patch-fmt-consteval.py`
-
-**自动触发条件**：检测到 `ios/Pods/fmt/include/fmt/format-inl.h` 存在且包含 `FMT_STRING` 调用时自动执行。
+规则：
+- 有什么就跑什么
+- 没有的项标记 `N/A`
+- 至少要有一个可代表交付质量的验证步骤
 
 ---
 
-## 相关文件路径
+## PROGRESS.md 格式（只有 orchestrator 写）
 
-| 文件 | 路径 |
-|------|------|
-| Orchestrator AGENTS | `~/.openclaw/workspace-orchestrator/AGENTS.md` |
-| Coder AGENTS | `~/.openclaw/workspace-coder/AGENTS.md` |
-| QA AGENTS | `~/.openclaw/workspace-qa/AGENTS.md` |
-| Skill | `~/.openclaw/workspace/skills/asds-mode/` |
-| 设计文档 | `~/.openclaw/workspace/state/autonomous-devops.md` |
-| 操作手册 | `~/.openclaw/workspace/state/autonomous-devops-manual.md` |
-| GitHub | https://github.com/kingjason229-png/asds-mode |
+```markdown
+## [任务ID] - [时间]
+- status: IN_PROGRESS | DONE | RETRY | BLOCKED
+- summary: [本次动作]
+- validation: [通过 / 失败 / N/A]
+- next: [下一步]
+```
+
+用途：
+- 方便 `tail PROGRESS.md` 巡检
+- 但不作为状态真相源
+
+---
+
+## 调度规则
+
+1. orchestrator 读取 `tasks.json`
+2. 若 `active_task_id` 非空，则不再派发新任务
+3. 找到第一个 `PENDING` 任务，设为 `IN_PROGRESS`
+4. 派发 `coder`
+5. `coder` 完成后，若通过验证则交给 `qa`
+6. `qa` 根据结果写回：
+   - `DONE`
+   - `RETRY`（并增加 `retry_count`）
+   - `BLOCKED`
+7. orchestrator 记录 `PROGRESS.md`
+8. 若为 `RETRY`，重置为 `PENDING` 后进入下一轮
+9. 若全部 `DONE`，通知用户完成
+
+---
+
+## 自动化范围（瘦身）
+
+保留：
+- 一个 orchestrator
+- 一个 coder
+- 一个 qa
+- 一个 cron 定时唤醒 orchestrator
+- 一个最小阻塞通知
+
+删除/冻结：
+- 独立 PM Agent
+- 并发 coder
+- 7 层触发器
+- 晨间站会
+- 夜间回归自动写任务
+- 工作区同步
+- 愿景核准
+- 记忆修剪自动化
+- 多项目自动巡检
+
+---
+
+## 什么时候可以升级回完整版
+
+只有满足以下条件时，才考虑恢复更复杂能力：
+- 串行闭环长期稳定
+- 状态机定义无冲突
+- `tasks.json` 原子写已验证稳定
+- `BLOCKED` / `RETRY` 流程已验证可靠
+- 至少连续多次真实项目运行无重复派发/无状态损坏
+
+在此之前，不要恢复并发、多项目、外围治理自动化。
+
+---
+
+## 主对话触发规则（新增）
+
+当用户在 OpenClaw 主对话里说“启动 ASDS Lite / 新建 ASDS 项目 / 用 ASDS 做这个需求 / 这条消息本身就是需求”时：
+
+1. 不要先做多项目巡检
+2. 不要回复“ASDS Lite 触发器已就绪，等待需求输入”
+3. 直接把用户原话落到 canonical workspace：`~/.openclaw/workspace`
+4. 如需 fresh intake，调用：`python3 ~/.openclaw/workspace/scripts/asds-dialogue-intake.py fresh --message "<用户原话>" --run`
+5. 如属继续当前项目，调用：`python3 ~/.openclaw/workspace/scripts/asds-dialogue-intake.py resume --message "<用户原话>" --run`
+6. 只允许读写 canonical workspace 下的 `DEMAND.md` / `tasks.json` / `PROGRESS.md`
+7. 禁止把任务写到任何旧路径，例如 `~/asds-workspace/projects/*`
+8. 禁止为了“补闭环”再临时创建第二套项目目录或第二份 `tasks.json`
+
+这条规则优先级高于历史巡检习惯。ASDS Lite 的默认入口是 canonical workspace intake，不是多项目扫描。
+
+## 一句话判断标准
+
+如果一个规则不能直接提升 “PENDING → DONE/BLOCKED” 主闭环的可靠性，就先不要加。
